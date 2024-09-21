@@ -1,0 +1,1229 @@
+!pip install vaderSentiment
+!pip install fredapi
+!pip install plotly
+!pip install pmdarima
+!pip install pandas_ta yfinance plotly
+import pandas_ta as ta
+import pmdarima as pm
+import requests
+from textblob import TextBlob
+from bs4 import BeautifulSoup
+import seaborn as sns
+import warnings
+from statsmodels.tsa.arima.model import ARIMA
+from prophet import Prophet
+import sys
+import yfinance as yf
+from fredapi import Fred
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.dates import DateFormatter
+from sklearn.linear_model import LinearRegression
+from keras.models import Sequential
+from keras.layers import LSTM, Dense
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+import plotly.express as px
+from sklearn.preprocessing import MinMaxScaler
+import io
+from contextlib import contextmanager
+from datetime import datetime
+
+class SuppressOutput(io.StringIO):
+    def write(self, s):
+        pass  # Override write to suppress output
+
+def suppress_output(func, *args, **kwargs):
+    """Suppress output of a function."""
+    old_stdout = sys.stdout
+    sys.stdout = SuppressOutput()
+    try:
+        result = func(*args, **kwargs)
+    finally:
+        sys.stdout = old_stdout
+    return result
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="_plotly_utils.basevalidators")
+
+
+# Constants
+ALPHA_VANTAGE_API_KEY = "your_alpha_vantage_api_key"
+symbols = ["AAPL"]#,"NVDA","TSLA"]
+
+
+# News Sensitivity Analysis
+def fetch_news(symbol):
+    stock = yf.Ticker(symbol)
+    news_list = stock.news
+    if not news_list:
+        return []
+
+    news_data = []
+    for news_item in news_list:
+        news_data.append({
+            'title': news_item['title'],
+            'url': news_item['link']
+        })
+
+    print(news_data)  # This will show the list of dictionaries
+    return news_data  # Now returns a list of dictionaries
+
+def analyze_sentiment(text):
+    analysis = TextBlob(text)
+    return {
+        'neg': analysis.sentiment.polarity < 0,
+        'neu': analysis.sentiment.polarity == 0,
+        'pos': analysis.sentiment.polarity > 0,
+        'compound': analysis.sentiment.polarity
+    }
+
+
+
+# Fetch news and sentiment data (CoinMarketCap or any suitable API)
+def fetch_news_sentiment():
+    print('Process: fetch_news_sentiment')
+    url = "https://newsapi.org/v2/everything?q=stock market&apiKey=3506c8c7d53d411c97371fe60cd2c050"
+    response = requests.get(url)
+    news_data = response.json().get('articles', [])
+    print(news_data)
+
+    sentiments = []
+    for news in news_data:
+      sentiment = analyze_sentiment(news['description'] or '')
+      sentiments.append(sentiment['compound'])
+      print(sentiment)
+    return np.mean(sentiments) #if sentiments else 0
+
+
+
+def get_news_sentiment(symbol):
+    print('Process: get_news_sentiment')
+    news_data = fetch_news(symbol)
+    if not news_data:
+        return "No news available for this symbol."
+
+    sentiment_results = {'Positive': 0, 'Negative': 0, 'Neutral': 0}
+    for new in news_data:
+        print(f"Title: {new['title']} and URL: {new['url']}")
+        sentiment = analyze_sentiment(new["title"])  # This now returns a dict
+
+        # Determine sentiment label
+        if sentiment['pos']:
+            sentiment_label = 'Positive'
+        elif sentiment['neg']:
+            sentiment_label = 'Negative'
+        else:
+            sentiment_label = 'Neutral'
+
+        print('Sentiment data:', sentiment_label)  # This should print the sentiment label
+
+        # Update sentiment count
+        if sentiment_label in sentiment_results:
+            sentiment_results[sentiment_label] += 1
+        else:
+            print(f"Unknown sentiment: {sentiment_label}")
+
+    # Determine the most dominant sentiment
+    max_sentiment = max(sentiment_results, key=sentiment_results.get)
+    print(f'Max sentiment: {max_sentiment}')
+    return max_sentiment
+
+
+
+
+def fetch_data_from_alpha_vantage(symbol):
+    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=5min&apikey={ALPHA_VANTAGE_API_KEY}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        if "Time Series (5min)" not in data:
+            note = data.get('Note', '')
+            error_message = data.get('Error Message', 'Unknown error')
+            print(f"Alpha Vantage error for {symbol}: {note or error_message}")
+            return None
+
+        time_series = data['Time Series (5min)']
+        df = pd.DataFrame.from_dict(time_series, orient='index')
+        df.index = pd.to_datetime(df.index)
+        df = df.rename(columns={
+            '1. open': 'Open',
+            '2. high': 'High',
+            '3. low': 'Low',
+            '4. close': 'Close',
+            '5. volume': 'volume'
+        })
+
+        df = df.apply(pd.to_numeric, errors='coerce')
+        df['symbol'] = symbol
+        df.reset_index(inplace=True)
+        df.rename(columns={'index': 'timestamp'}, inplace=True)
+
+        return df
+
+    except requests.exceptions.RequestException as e:
+        print(f"Request error from Alpha Vantage for {symbol}: {e}")
+        return None
+
+
+
+def fetch_data_from_yf(symbol,period='1y',interval='1d'):
+    try:
+        df = yf.download(symbol, interval=interval, period=period, progress=False)
+        if df.empty:
+            print(f"No data returned for {symbol}")
+            return None
+
+        df['symbol'] = symbol
+        df['Return'] = df['Adj Close'].pct_change()
+        df.reset_index(inplace=True)
+        df.rename(columns={
+            'Datetime': 'timestamp',
+            'Date': 'timestamp',
+            'timestamp': 'timestamp',
+            'Open': 'Open',
+            'High': 'High',
+            'Low': 'Low',
+            'Close': 'Close',
+            'Adj Close': 'Adj Close',
+            'Volume': 'volume'
+        }, inplace=True)
+
+        return df
+
+
+
+
+    except Exception as e:
+        print(f"Error fetching data from Yahoo Finance for {symbol}: {e}")
+        return None
+
+#Prediction models chart
+def fetch_data_from_yf_predic(symbol, period, interval):
+    data = yf.download(symbol, interval=interval, period=period, progress=False)
+    data = data[['Adj Close']]
+    return data
+
+# ARIMA Model
+def arima_model(stock_data):
+    try:
+        # Check data for stationarity
+        from statsmodels.tsa.stattools import adfuller
+        result = adfuller(stock_data['Adj Close'])
+        print(f'ADF Statistic: {result[0]}')
+        print(f'p-value: {result[1]}')
+        stock_data['Adj Close Diff'] = stock_data['Adj Close'].diff().dropna()
+        result = adfuller(stock_data['Adj Close Diff'].dropna())
+        print(f'ADF Statistic: {result[0]}')
+        print(f'p-value: {result[1]}')
+
+        auto_arima_model = pm.auto_arima(
+            stock_data['Adj Close'],
+            start_p=1, start_q=1,
+            max_p=20, max_q=20,
+            d=1,
+            seasonal=False,
+            stepwise=True,
+            trace=True,
+            suppress_warnings=True,
+            error_action='ignore',
+            approx=True
+        )
+        print("ARIMA Model Summary:")
+        print(auto_arima_model.summary())
+
+        arima_result = auto_arima_model.fit(stock_data['Adj Close'])
+        print("ARIMA model fitted successfully")
+
+        # In-sample predictions
+        stock_data['ARIMA_Prediction'] = arima_result.predict_in_sample(dynamic=False)
+
+        # Calculate future predictions
+        last_date = stock_data.index[-1]
+        today = pd.Timestamp(datetime.today().date())
+        future_days = (today - last_date).days
+
+
+        if future_days > 0:
+            future_forecast = arima_result.predict(n_periods=future_days)
+            future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=future_days, freq='D')
+            future_df = pd.DataFrame(future_forecast, index=future_dates, columns=['ARIMA_Prediction'])
+            stock_data = pd.concat([stock_data, future_df])
+            print(f"Future predictions made up to {today}")
+        else:
+            print("No future prediction needed.")
+
+    except Exception as e:
+        print(f"Error fitting ARIMA model: {e}")
+
+    return stock_data, arima_result
+
+
+
+# LSTM Model
+def lstm_model(stock_data):
+    # Scale the data
+    data = stock_data['Adj Close'].values
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    data_scaled = scaler.fit_transform(data.reshape(-1, 1))
+
+    # Prepare LSTM input
+    X = []
+    y = []
+    for i in range(60, len(data_scaled)):
+        X.append(data_scaled[i-60:i, 0])
+        y.append(data_scaled[i, 0])
+    X, y = np.array(X), np.array(y)
+    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+
+    # Define and compile the LSTM model
+    model = Sequential()
+    model.add(LSTM(units=50, return_sequences=True, input_shape=(X.shape[1], 1)))
+    model.add(LSTM(units=50, return_sequences=False))
+    model.add(Dense(units=25))
+    model.add(Dense(units=1))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+
+    # Train the model
+    model.fit(X, y, batch_size=1, epochs=10)  # Increased epochs
+
+    # Generate predictions
+    lstm_predictions_scaled = model.predict(X)
+    lstm_predictions = scaler.inverse_transform(lstm_predictions_scaled)
+
+    # Add predictions to the DataFrame
+    stock_data['LSTM_Prediction'] = np.nan
+    stock_data.iloc[60:, stock_data.columns.get_loc('LSTM_Prediction')] = lstm_predictions.reshape(-1)
+    return stock_data, model, lstm_predictions
+
+
+def plot_prediction(data, arima_result, lstm_predictions):
+
+    # Split the data into training and testing sets
+    train_size = int(len(data) * 0.8)
+    train_data = data[:train_size]
+    test_data = data[train_size:].copy()
+
+    # Make ARIMA predictions for the test data
+    arima_pred = arima_result.predict_in_sample(start=len(train_data), end=len(data)-1)
+    print("ARIMA In-Sample Predictions:")
+    print(arima_pred.head())  # Print only the first few predictions for brevity
+
+    # Check if the ARIMA predictions are constant
+    if arima_pred.nunique() == 1:
+        print("Warning: ARIMA predictions are constant. Check model configuration.")
+
+    # Extend ARIMA predictions into the future
+    future_steps = len(test_data)
+    print(future_steps)
+
+    # Ensure the test_data index is in datetime format
+    test_data.index = pd.to_datetime(test_data.index)
+
+    # Use predict instead of forecast for future ARIMA predictions
+    arima_future_pred = arima_result.predict(n_periods=future_steps)
+    print("Future ARIMA Predictions:")
+    print(arima_future_pred[:5])  # Print only the first few predictions for brevity
+
+    # Adjust LSTM predictions to match the future steps length
+    future_lstm_predictions = np.full(future_steps, np.nan)  # Default to NaN
+    if len(lstm_predictions) >= future_steps:
+        future_lstm_predictions[:future_steps] = lstm_predictions.flatten()[:future_steps]
+    else:
+        future_lstm_predictions[:len(lstm_predictions)] = lstm_predictions.flatten()
+
+
+    # Create a DataFrame for future predictions
+    future_dates = pd.date_range(start=test_data.index[-1] + pd.Timedelta(days=1), periods=future_steps, freq='D')
+    future_df = pd.DataFrame(index=future_dates, data={
+        'ARIMA_Prediction': arima_future_pred,
+        'LSTM_Prediction': future_lstm_predictions
+    })
+    print("Future DataFrame:")
+    print(future_df.head())  # Print only the first few rows for brevity
+
+    # Create Plotly traces
+    traces = []
+
+    # Plot actual train and test data
+    traces.append(go.Scatter(x=train_data.index, y=train_data['Adj Close'], mode='lines', name='Train Data', line=dict(color='#00B2E2')))
+    traces.append(go.Scatter(x=test_data.index, y=test_data['Adj Close'], mode='lines', name='Test Data', line=dict(color='#FF6600')))
+
+    # ARIMA Predictions
+    traces.append(go.Scatter(x=test_data.index, y=arima_pred, mode='lines', name='ARIMA Predictions', line=dict(color='purple', dash='dash')))
+
+    # LSTM Predictions
+    if 'LSTM_Prediction' in test_data.columns:
+        traces.append(go.Scatter(x=test_data.index, y=test_data['LSTM_Prediction'], mode='lines', name='LSTM Predictions', line=dict(color='green', dash='dash')))
+
+   # Future ARIMA Predictions
+    if not future_df['ARIMA_Prediction'].isna().all():
+        traces.append(go.Scatter(x=future_df.index, y=future_df['ARIMA_Prediction'], mode='lines', name='Future ARIMA Predictions', line=dict(color='purple', dash='dot')))
+
+    # Future LSTM Predictions
+    if not future_df['LSTM_Prediction'].isna().all():
+        traces.append(go.Scatter(x=future_df.index, y=future_df['LSTM_Prediction'], mode='lines', name='Future LSTM Predictions', line=dict(color='green', dash='dot')))
+
+    # Create Plotly figure
+    fig = go.Figure(data=traces)
+
+    # Update layout for interactive features
+    fig.update_layout(
+        title='Stock Price Prediction: ARIMA & LSTM',
+        xaxis_title='Date',
+        yaxis_title='Close Price (USD)',
+        template='plotly_dark',  # Dark theme
+        hovermode='x unified'
+    )
+
+    # Show the plot
+    fig.show()
+
+def calculate_indicators_index(data):
+    if 'Close' not in data.columns or data.empty:
+        return data
+
+    # Ensure enough data for calculations
+    if len(data) < 200:
+        print("Not enough data to calculate indicators.")
+        return data
+
+        # Calculate SMA
+        data['SMA50'] = ta.sma(data['Close'], length=50)
+        data['SMA200'] = ta.sma(data['Close'], length=200)
+
+        data['EMA20'] = ta.ema(data['Close'], length=20)
+
+        # Calculate RSI
+        data['RSI'] = ta.rsi(data['Close'], length=14)
+
+        # Calculate MACD
+        macd_result = ta.macd(data['Close'])
+        data['MACD'] = macd_result['MACD_12_26_9']
+        data['MACD_signal'] = macd_result['MACDs_12_26_9']
+        data['MACD_histogram'] = macd_result['MACDh_12_26_9']
+
+        # Calculate Bollinger Bands
+        bb_result = ta.bbands(data['Close'], length=5, std=2.0)
+        data['BBL_20'] = bb_result['BBL_5_2.0']
+        data['BBM_20'] = bb_result['BBM_5_2.0']
+        data['BBU_20'] = bb_result['BBU_5_2.0']
+
+        # Calculate ATR
+        if 'High' in data.columns and 'Low' in data.columns:
+            data['ATR'] = ta.atr(data['High'], data['Low'], data['Close'], length=14)
+
+        # Calculate Stochastic Oscillator
+        stoch_result = ta.stoch(data['High'], data['Low'], data['Close'])
+        data['Stoch_K'] = stoch_result[0]
+        data['Stoch_D'] = stoch_result[1]
+
+        # Calculate OBV
+        if 'Volume' in data.columns:
+            data['OBV'] = ta.obv(data['Close'], data['Volume'])
+
+        # Calculate CMF
+        if 'Volume' in data.columns:
+            data['CMF'] = ta.cmf(data['High'], data['Low'], data['Close'], data['Volume'])
+
+    return data
+
+
+def calculate_indicators(df):
+    if df.empty:
+        return df
+
+    print(df.columns)
+    # Moving Average
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # Volatility
+    df['Volatility'] = df['Close'].rolling(window=20).std()
+
+    # MACD
+    df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+    df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = df['EMA_12'] - df['EMA_26']
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+    # Bollinger Bands
+    df['BBM_20'] = df['Close'].rolling(window=20).mean()
+    df['BBU_20'] = df['BBM_20'] + 2 * df['Close'].rolling(window=20).std()
+    df['BBL_20'] = df['BBM_20'] - 2 * df['Close'].rolling(window=20).std()
+
+    # Average True Range (ATR)
+    df['High-Low'] = df['High'] - df['Low']
+    df['High-Close'] = np.abs(df['High'] - df['Close'].shift())
+    df['Low-Close'] = np.abs(df['Low'] - df['Close'].shift())
+    df['True_Range'] = df[['High-Low', 'High-Close', 'Low-Close']].max(axis=1)
+    df['ATR'] = df['True_Range'].rolling(window=14).mean()
+
+    return df
+
+
+def fetch_pe_ratio(symbol):
+    stock = yf.Ticker(symbol)
+    try:
+        info = stock.info
+        pe_ratio = info.get('forwardEps') / info.get('currentPrice') if info.get('currentPrice') else None
+        return pe_ratio
+    except Exception as e:
+        print(f"Error fetching P/E ratio for {symbol}: {e}")
+        return None
+
+def make_recommendation(df, pe_ratio=None):
+    if df.empty or len(df) < 20:
+        return None
+
+    latest_data = df.iloc[-1]
+    recommendation = "Hold"
+
+    if (latest_data['Close'] > latest_data['SMA_20'] and
+        latest_data['RSI'] < 30 and
+        latest_data['MACD'] > latest_data['MACD_Signal'] and
+        latest_data['Close'] < latest_data['BBL_20'] and
+        (pe_ratio and pe_ratio < 20)):  # Example P/E Ratio condition
+        recommendation = "Buy"
+
+    elif (latest_data['Close'] < latest_data['SMA_20'] and
+          latest_data['RSI'] > 70 and
+          latest_data['MACD'] < latest_data['MACD_Signal'] and
+          latest_data['Close'] > latest_data['BBU_20'] and
+          (pe_ratio and pe_ratio > 30)):  # Example P/E Ratio condition
+        recommendation = "Sell"
+
+    return recommendation
+
+def analyze_macroeconomic_data():
+    # MacroEconomics Indicators
+    fred = Fred(api_key='38a85b8262a0044479cc6200b3c2c99f')
+    macro_data = {}
+    positive_indicators = 0
+    negative_indicators = 0
+
+
+    # Fetching GDP data (GDP is the identifier for the Gross Domestic Product in FRED)
+    try:
+        gdp_data = fred.get_series('GDP')
+        macro_data['gdp_data'] = gdp_data.iloc[-1]
+    # GDP is generally considered a positive indicator
+        if macro_data.get('gdp_data'):
+          positive_indicators += 1
+    except Exception as e:
+        print(f"Error fetching GDP data: {e}")
+        gdp_data = None
+
+    # Inflation Rate (CPI/PPI)
+    try:
+        cpi_data = fred.get_series('CPIAUCNS')
+        macro_data['cpi_data'] = cpi_data.iloc[-1]
+    # CPI and PPI: Inflationary indicators; High values can be negative
+        if macro_data.get('cpi_data') and macro_data['cpi_data'] > 2:
+            negative_indicators += 1
+        if macro_data.get('ppi_data') and macro_data['ppi_data'] > 2:
+            negative_indicators += 1
+    except Exception as e:
+        cpi_data = None
+
+    try:
+        ppi_data = fred.get_series('PPIACO')
+        macro_data['ppi_data'] = ppi_data.iloc[-1]
+    except Exception as e:
+        ppi_data = None
+
+    # Unemployment Rate
+    try:
+        unemployment_data = fred.get_series('UNRATE')
+        macro_data['unemployment_data'] = unemployment_data.iloc[-1]
+        # Unemployment Rate: Lower is generally better
+        if macro_data.get('unemployment_data') and macro_data['unemployment_data'] < 5:
+            positive_indicators += 1
+        else:
+            negative_indicators += 1
+    except Exception as e:
+        unemployment_data = None
+
+    # Interest Rates
+    try:
+        fed_funds_rate = fred.get_series('FEDFUNDS')
+        macro_data['fed_funds_rate'] = fed_funds_rate.iloc[-1]
+        # Federal Funds Rate: Higher rates are often seen as negative
+        if macro_data.get('fed_funds_rate') and macro_data['fed_funds_rate'] < 2:
+            positive_indicators += 1
+        else:
+            negative_indicators += 1
+    except Exception as e:
+        fed_funds_rate = None
+
+    # Consumer Confidence Index
+    try:
+        consumer_confidence_data = fred.get_series('CONCCONF')
+        macro_data['consumer_confidence_data'] = consumer_confidence_data.iloc[-1]
+        # Consumer Confidence Index: Higher is better
+        if macro_data.get('consumer_confidence_data') and macro_data['consumer_confidence_data'] > 100:
+            positive_indicators += 1
+    except Exception as e:
+        consumer_confidence_data = None
+
+    # PMI (Purchasing Managers' Index)
+    try:
+        pmi_data = fred.get_series('ISM/MAN_PMI')
+        macro_data['pmi_data'] = pmi_data.iloc[-1]
+            # PMI: Higher indicates economic growth
+        if macro_data.get('pmi_data') and macro_data['pmi_data'] > 50:
+            positive_indicators += 1
+        else:
+            negative_indicators += 1
+    except Exception as e:
+        pmi_data = None
+
+    if not macro_data:
+        return "Neutral"
+
+    if positive_indicators > negative_indicators:
+        suggestion="Macroeconomic Suggestion: Positive"
+    elif negative_indicators > positive_indicators:
+        suggestion="Macroeconomic Suggestion: Negative"
+    else:
+        suggestion="Macroeconomic Suggestion: Neutral"
+    print(macro_data)
+    return macro_data,suggestion
+
+
+def print_colored(text, color_code):
+    """
+    Prints text with a specific color and bold effect.
+    """
+    return f"\033[1;{color_code}m{text}\033[0m"
+
+def process_symbol(symbol, period, interval):
+    print(f"\n***{symbol}***")
+
+    # Fetch and analyze news sentiment
+    news_sentiment = fetch_news_sentiment()
+
+    # Suppress output from fetching financial data
+    df_alpha_vantage = suppress_output(fetch_data_from_alpha_vantage, symbol)
+    df_yf = suppress_output(fetch_data_from_yf, symbol, period, interval)
+    alpha_vantage_recommendation = None
+    yf_recommendation = None
+
+    pe_ratio = fetch_pe_ratio(symbol)
+
+    if df_alpha_vantage is not None and not df_alpha_vantage.empty:
+        df_alpha_vantage = calculate_indicators(df_alpha_vantage)
+        alpha_vantage_recommendation = make_recommendation(df_alpha_vantage, pe_ratio)
+        print("\nAlpha Vantage Data Indicators:")
+        print(df_alpha_vantage.tail())
+        explain_indicators(df_alpha_vantage.tail().iloc[-1], pe_ratio, source="Alpha Vantage")
+
+    if df_yf is not None and not df_yf.empty:
+        df_yf = calculate_indicators(df_yf)
+        yf_recommendation = make_recommendation(df_yf, pe_ratio)
+        print("\nYahoo Finance Data Indicators:")
+        explain_indicators(df_yf.tail().iloc[-1], pe_ratio, source="Yahoo Finance")
+
+    # Fetch and analyze macroeconomic data
+    macro_sentiment = analyze_macroeconomic_data()
+
+    # Determine overall financial analysis sentiment
+    financial_analysis_sentiment = "Neutral"
+    if alpha_vantage_recommendation == "Buy" or yf_recommendation == "Buy":
+        financial_analysis_sentiment = "Positive"
+    elif alpha_vantage_recommendation == "Sell" or yf_recommendation == "Sell":
+        financial_analysis_sentiment = "Negative"
+
+    # Print consolidated results
+    print("\nRecommendations:")
+    print(f"Financial Analysis: {print_colored(financial_analysis_sentiment, '32' if financial_analysis_sentiment == 'Positive' else '31' if financial_analysis_sentiment == 'Negative' else '33')}")
+    print(f"Macroeconomic Analysis: {print_colored(macro_sentiment, '32' if macro_sentiment == 'Positive' else '31' if macro_sentiment == 'Negative' else '33')}")
+    print(f"News Sensitivity Analysis: {print_colored(news_sentiment, '32' if news_sentiment == 'Positive' else '31' if news_sentiment == 'Negative' else '33')}")
+
+    # Create and show charts
+    create_charts(symbol)
+
+
+def explain_indicators(latest_data, pe_ratio, source=""):
+    """
+    Explain the indicators and provide a rationale for whether the signal is Positive, Negative, or Neutral.
+    """
+    print(f"\n{source} Indicator Explanation:")
+
+    # Moving Averages
+    print(f"MA_20: {latest_data['SMA_20']:.2f} (20-day Moving Average)")
+    if latest_data['Close'] > latest_data['SMA_20']:
+        print("The current price is above the 20-day moving average, which is generally a Positive signal.")
+    else:
+        print("The current price is beLow the 20-day moving average, which can be a Negative signal.")
+
+    # RSI
+    print(f"RSI: {latest_data['RSI']:.2f} (Relative Strength Index)")
+    if latest_data['RSI'] < 30:
+        print(print_colored("RSI is beLow 30, indicating that the stock might be oversold and could be a Positive signal.", '32'))
+    elif latest_data['RSI'] > 70:
+        print(print_colored("RSI is above 70, indicating that the stock might be overbought and could be a Negative signal.", '31'))
+    else:
+        print(print_colored("RSI is between 30 and 70, suggesting a Neutral stance.", '33'))
+
+    # MACD
+    print(f"MACD: {latest_data['MACD']:.2f}")
+    print(f"MACD Signal Line: {latest_data['MACD_Signal']:.2f}")
+    if latest_data['MACD'] > latest_data['MACD_Signal']:
+        print(print_colored("MACD is above the signal line, which is a Positive momentum signal.", '32'))
+    else:
+        print(print_colored("MACD is beLow the signal line, which indicates a Negative momentum signal.", '31'))
+
+    # Bollinger Bands
+    print(f"Bollinger Upper Band: {latest_data['BBU_20']:.2f}")
+    print(f"Bollinger Lower Band: {latest_data['BBL_20']:.2f}")
+    if latest_data['Close'] < latest_data['BBL_20']:
+        print(print_colored("Price is beLow the Lower Bollinger Band, which could be a Positive buying opportunity.", '32'))
+    elif latest_data['Close'] > latest_data['BBU_20']:
+        print(print_colored("Price is above the upper Bollinger Band, which might indicate an overbought condition and could be Negative.", '31'))
+    else:
+        print(print_colored("Price is within the Bollinger Bands, suggesting a Neutral outlook.", '33'))
+
+    # ATR (Volatility)
+    print(f"ATR: {latest_data['ATR']:.2f} (Average True Range)")
+    if latest_data['ATR'] > latest_data['ATR'].mean():
+        print("High ATR suggests increased volatility, which can be a risk factor.")
+    else:
+        print("Low ATR suggests Lower volatility, which could imply stability.")
+
+    # P/E Ratio
+    if pe_ratio:
+        print(f"P/E Ratio: {pe_ratio:.2f}")
+        if pe_ratio < 20:
+            print(print_colored("A Low P/E ratio might indicate that the stock is undervalued, which could be a Positive signal.", '32'))
+        elif pe_ratio > 30:
+            print(print_colored("A High P/E ratio might suggest overvaluation, which could be a Negative signal.", '31'))
+        else:
+            print(print_colored("P/E ratio is within a Neutral range.", '33'))
+    else:
+        print("P/E Ratio not available.")
+
+
+
+def create_charts(symbol):
+    periods = ['1y', '6mo', '1d']
+    intervals = ['1d', '1d', '1m']
+
+    for period, interval in zip(periods, intervals):
+        data = fetch_data_from_yf(symbol, period, interval)
+        if data is None or data.empty:
+            print(f"No data available for {symbol} with period {period} and interval {interval}")
+            continue
+
+        # Calculate indicators
+        data = calculate_indicators(data)
+
+        # Create traces for plotly
+        traces = []
+
+        # Closing price trace
+        traces.append(go.Scatter(x=data['timestamp'], y=data['Close'], mode='lines', name='Close', line=dict(color='#00B2E2')))
+
+        # Bollinger Bands traces
+        traces.append(go.Scatter(x=data['timestamp'], y=data['BBU_20'], mode='lines', name='Bollinger Upper Band', line=dict(color='red', dash='dash')))
+        traces.append(go.Scatter(x=data['timestamp'], y=data['BBL_20'], mode='lines', name='Bollinger Lower Band', line=dict(color='red', dash='dash')))
+
+        # Moving Averages traces
+        traces.append(go.Scatter(x=data['timestamp'], y=data['SMA_20'], mode='lines', name='MA 20', line=dict(color='green')))
+        traces.append(go.Scatter(x=data['timestamp'], y=data['SMA_50'], mode='lines', name='MA 50', line=dict(color='orange')))
+        traces.append(go.Scatter(x=data['timestamp'], y=data['SMA_200'], mode='lines', name='MA 200', line=dict(color='purple')))
+
+        # Create figure
+        fig = go.Figure(data=traces)
+
+        # Update layout for interactive features
+        fig.update_layout(
+            title=f'{symbol} - {period} {interval}',
+            xaxis_title=f'Date: {data["timestamp"].iloc[-1].strftime("%Y-%m-%d %H:%M:%S")}',
+            yaxis_title='Value',
+            template='plotly_dark',  # Dark theme
+            hovermode='x unified'
+        )
+
+        # Show the plot
+        fig.show()
+
+
+def add_signals(data, arima_result, lstm_predictions):
+    # Ensure we are working on a copy to avoid the SettingWithCopyWarning
+    data = data.copy()
+
+    # Extract ARIMA predictions and flatten to 1D array
+    arima_predictions = arima_result.predict(n_periods=len(data))
+    arima_predictions = np.array(arima_predictions).ravel()  # Flatten to 1D
+    arima_predictions = pd.Series(arima_predictions, index=data.index)  # Align with stock data
+
+    # Ensure LSTM predictions align with the stock data index (fill missing values)
+    lstm_predictions = np.array(lstm_predictions).ravel()  # Flatten LSTM predictions
+    if len(lstm_predictions) < len(data):
+        lstm_predictions = pd.Series(lstm_predictions, index=data.index[-len(lstm_predictions):])
+        lstm_predictions = lstm_predictions.reindex(data.index, fill_value=np.nan)
+    else:
+        lstm_predictions = pd.Series(lstm_predictions, index=data.index)
+
+    # Create signals for buy/sell using the aligned ARIMA/LSTM predictions
+    data['Signal'] = 0
+    data['Buy'] = np.nan
+    data['Sell'] = np.nan
+
+    # Moving Average Crossover (for example)
+    short_window = 50
+    long_window = 200
+    data['SMA_short'] = data['Adj Close'].rolling(window=short_window).mean()
+    data['SMA_long'] = data['Adj Close'].rolling(window=long_window).mean()
+
+    # Buy signal when short moving average crosses above long moving average
+    data['Signal'][short_window:] = np.where(
+        data['SMA_short'][short_window:] > data['SMA_long'][short_window:], 1, 0
+    )
+
+    # Generate Buy/Sell signals based on moving average crossovers
+    for i in range(1, len(data)):
+        if data['Signal'].iloc[i-1] == 0 and data['Signal'].iloc[i] == 1:
+            data['Buy'].iloc[i] = data['Adj Close'].iloc[i]
+        elif data['Signal'].iloc[i-1] == 1 and data['Signal'].iloc[i] == 0:
+            data['Sell'].iloc[i] = data['Adj Close'].iloc[i]
+
+    # Combine with ARIMA/LSTM predictions
+    # Buy signal if ARIMA/LSTM predictions are higher than the actual price
+    data['ARIMA_Buy_Signal'] = np.where(arima_predictions > data['Adj Close'], 1, 0)
+    data['LSTM_Buy_Signal'] = np.where(lstm_predictions > data['Adj Close'], 1, 0)
+
+    return data
+
+
+
+
+
+def plot_signals(data):
+    traces = []
+
+    # Add stock price trace
+    traces.append(go.Scatter(x=data.index, y=data['Adj Close'], mode='lines', name='Stock Price'))
+
+    # Add buy/sell markers
+    traces.append(go.Scatter(x=data.index, y=data['Buy'], mode='markers', name='Buy Signal',
+                             marker=dict(color='green', size=10, symbol='triangle-up')))
+    traces.append(go.Scatter(x=data.index, y=data['Sell'], mode='markers', name='Sell Signal',
+                             marker=dict(color='red', size=10, symbol='triangle-down')))
+
+    # Create Plotly figure
+    fig = go.Figure(data=traces)
+    fig.update_layout(title='Stock Price with Buy/Sell Signals', template='plotly_dark')
+    fig.show()
+
+
+
+# Function to plot supporting indices
+def plot_supporting_indices(indices):
+    fig = go.Figure()
+
+    for symbol in indices:
+        data = yf.download(symbol, start='2020-01-01', end='2024-09-01')
+        fig.add_trace(go.Scatter(x=data.index, y=data['Close'], mode='lines', name=f'{symbol} Close Price'))
+
+    fig.update_layout(
+        title='Supporting Indices',
+        xaxis_title='Date',
+        yaxis_title='Price',
+        template='plotly_dark',
+        hovermode='x unified',
+        showlegend=True
+    )
+
+    fig.show()
+
+
+def analyze_index(symbol, supporting_indices):
+    # Download historical data for 1-day period with 1-minute interval
+    print(f"Analyzing {symbol} with period='1d' and interval='1h'")
+    data_intraday = yf.download(tickers=symbol, period='1mo', interval='1h')
+
+    # Calculate indicators for intraday data
+    data_intraday = calculate_indicators_index(data_intraday)
+
+    # Plot primary index with indicators for intraday data
+    plot_primary_index(symbol, data_intraday)
+
+    # Download historical data for 1-year period with 1-day interval
+    print(f"Analyzing {symbol} with period='1y' and interval='1d'")
+    data_daily = yf.download(tickers=symbol, period='1y', interval='1d')
+
+    # Calculate indicators for daily data
+    data_daily = calculate_indicators_index(data_daily)
+
+    # Plot primary index with indicators for daily data
+    plot_primary_index(symbol, data_daily)
+
+    # Plot supporting indices (for reference over 1-year daily data)
+    plot_supporting_indices(supporting_indices)
+
+    # Make a buy/sell/hold decision based on daily data
+    decision = make_decision(data_daily)
+    print(f"Decision for {symbol}: {decision}")
+
+# Function to make a buy/sell/hold decision (example implementation)
+def make_decision(data):
+    # Initialize decision
+    decision = 'Hold'
+    data=calculate_indicators(data)
+    data=calculate_indicators_index(data)
+    print(data.head())
+    # Bollinger Bands decision
+    if data['Close'].iloc[-1] > data['BBU_20'].iloc[-1]:
+        decision = 'Sell '
+    elif data['Close'].iloc[-1] < data['BBL_20'].iloc[-1]:
+        decision = 'Buy'
+
+    # RSI decision
+    if 'RSI' in data.columns:
+        rsi_value = data['RSI'].iloc[-1]
+        if rsi_value > 70:
+            decision = 'Sell' if decision == 'Hold' else decision
+        elif rsi_value < 30:
+            decision = 'Buy' if decision == 'Hold' else decision
+
+    # MACD decision
+    if 'MACD' in data.columns and 'MACD_signal' in data.columns:
+        macd_value = data['MACD'].iloc[-1]
+        macd_signal_value = data['MACD_signal'].iloc[-1]
+        if macd_value > macd_signal_value:
+            decision = 'Buy' if decision == 'Hold' else decision
+        elif macd_value < macd_signal_value:
+            decision = 'Sell' if decision == 'Hold' else decision
+
+    # Stochastic Oscillator decision
+    if 'Stoch_K' in data.columns and 'Stoch_D' in data.columns:
+        stoch_k_value = data['Stoch_K'].iloc[-1]
+        stoch_d_value = data['Stoch_D'].iloc[-1]
+        if stoch_k_value > 80 and stoch_k_value < stoch_d_value:
+            decision = 'Sell' if decision == 'Hold' else decision
+        elif stoch_k_value < 20 and stoch_k_value > stoch_d_value:
+            decision = 'Buy' if decision == 'Hold' else decision
+
+    # EMA decision (using a simple 20-day EMA)
+    if 'EMA20' in data.columns:
+        ema20_value = data['EMA20'].iloc[-1]
+        if data['Close'].iloc[-1] > ema20_value:
+            decision = 'Buy' if decision == 'Hold' else decision
+        elif data['Close'].iloc[-1] < ema20_value:
+            decision = 'Sell' if decision == 'Hold' else decision
+
+    return decision
+
+def plot_primary_index(symbol, data):
+    fig = go.Figure()
+
+    # Plot Close Price and Moving Averages
+    fig.add_trace(go.Scatter(x=data.index, y=data['Close'], mode='lines', name=f'{symbol} Close Price', line=dict(color='cyan', width=2)))
+    if 'SMA50' in data.columns:
+      fig.add_trace(go.Scatter(x=data.index, y=data['SMA50'], mode='lines', name='50-Day SMA', line=dict(color='magenta', width=1.5)))
+    if 'SMA200' in data.columns:
+      fig.add_trace(go.Scatter(x=data.index, y=data['SMA200'], mode='lines', name='200-Day SMA', line=dict(color='yellow', width=1.5)))
+
+    # Plot Bollinger Bands
+    if 'BBU_20' in data.columns:
+      fig.add_trace(go.Scatter(x=data.index, y=data['BBU_20'], mode='lines', name='Bollinger Upper Band', line=dict(color='red', width=1, dash='dash')))
+    if 'BBM_20' in data.columns:
+      fig.add_trace(go.Scatter(x=data.index, y=data['BBM_20'], mode='lines', name='Bollinger Middle Band', line=dict(color='orange', width=1, dash='dash')))
+    if 'BBL_20' in data.columns:
+      fig.add_trace(go.Scatter(x=data.index, y=data['BBL_20'], mode='lines', name='Bollinger Lower Band', line=dict(color='green', width=1, dash='dash')))
+
+
+    # Plot MACD
+    if 'MACD' in data.columns and data['MACD'].notna().any():
+        fig.add_trace(go.Scatter(x=data.index, y=data['MACD'], mode='lines', name='MACD', line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=data.index, y=data['MACD_signal'], mode='lines', name='MACD Signal', line=dict(color='orange')))
+        fig.add_trace(go.Bar(x=data.index, y=data['MACD_histogram'], name='MACD Histogram', marker_color='gray'))
+
+    # Plot RSI
+    if 'RSI' in data.columns and data['RSI'].notna().any():
+        fig.add_trace(go.Scatter(x=data.index, y=data['RSI'], mode='lines', name='RSI', line=dict(color='purple')))
+        fig.add_trace(go.Scatter(x=data.index, y=[30]*len(data.index), mode='lines', name='Oversold', line=dict(color='green', dash='dash')))
+        fig.add_trace(go.Scatter(x=data.index, y=[70]*len(data.index), mode='lines', name='Overbought', line=dict(color='red', dash='dash')))
+
+    # Plot Stochastic Oscillator
+    if 'Stoch_K' in data.columns and data['Stoch_K'].notna().any():
+        fig.add_trace(go.Scatter(x=data.index, y=data['Stoch_K'], mode='lines', name='Stochastic %K', line=dict(color='blue')))
+    if 'Stoch_D' in data.columns and data['Stoch_D'].notna().any():
+        fig.add_trace(go.Scatter(x=data.index, y=data['Stoch_D'], mode='lines', name='Stochastic %D', line=dict(color='orange')))
+
+    # Plot OBV
+    if 'OBV' in data.columns and data['OBV'].notna().any():
+        fig.add_trace(go.Scatter(x=data.index, y=data['OBV'], mode='lines', name='OBV', line=dict(color='green')))
+
+    # Plot CMF
+    if 'CMF' in data.columns and data['CMF'].notna().any():
+        fig.add_trace(go.Scatter(x=data.index, y=data['CMF'], mode='lines', name='CMF', line=dict(color='red')))
+
+    # Update layout
+    fig.update_layout(
+        title=f'{symbol} Technical Indicators',
+        xaxis_title='Date',
+        yaxis_title='Value',
+        template='plotly_dark',
+        hovermode='x unified',
+        showlegend=True
+    )
+
+    fig.show()
+
+##########################################################################################
+##########################################################################################
+
+# Function for technical indicators
+def add_bollinger_bands(data, window=20, no_of_std=2):
+    rolling_mean = data['Adj Close'].rolling(window=window).mean()
+    rolling_std = data['Adj Close'].rolling(window=window).std()
+    data['BBL_20'] = rolling_mean - (rolling_std * no_of_std)
+    data['BBM_20'] = rolling_mean
+    data['BBU_20'] = rolling_mean + (rolling_std * no_of_std)
+    return data
+
+# Add SMA and EMA
+def add_moving_averages(data, window=20):
+    data['SMA_20'] = data['Adj Close'].rolling(window=window).mean()
+    data['EMA_20'] = data['Adj Close'].ewm(span=window, adjust=False).mean()
+    print(data['SMA_20'].head)
+    return data
+
+# Add MACD and Signal Line
+def add_macd(data, sLow=26, fast=12, signal=9):
+    data['MACD'] = data['Adj Close'].ewm(span=fast, adjust=False).mean() - data['Adj Close'].ewm(span=sLow, adjust=False).mean()
+    data['MACD_Signal'] = data['MACD'].ewm(span=signal, adjust=False).mean()
+    return data
+
+# Add RSI
+def add_rsi(data, window=14):
+    delta = data['Adj Close'].diff(1)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=window).mean()
+    avg_loss = loss.rolling(window=window).mean()
+    rs = avg_gain / avg_loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    return data
+
+
+
+
+# Sentiment analysis function using VADER
+def analyze_sentiment(text):
+    analyzer = SentimentIntensityAnalyzer()
+    return analyzer.polarity_scores(text)
+
+
+# Linear Regression Model
+def linear_regression_model(stock_data):
+    stock_data['Days'] = np.arange(len(stock_data))
+    X = stock_data[['Days']]
+    y = stock_data['Adj Close']
+
+    model = LinearRegression()
+    model.fit(X, y)
+    stock_data['LR_Prediction'] = model.predict(X)
+    return stock_data, model
+
+
+
+
+
+# Plotting function (Bloomberg-style)
+def plot_stock_data(stock_data, ticker):
+    # Create a subplot with a single chart
+    fig = make_subplots(rows=1, cols=1, shared_xaxes=True, vertical_spacing=0.1)
+
+    # Plot the primary stock price
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['Close'],
+        mode='lines', name=f'{ticker} Close Price',
+        line=dict(color='cyan'),
+        hovertemplate='<b>Price</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    # Plot Bollinger Bands
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['BBU_20'],
+        mode='lines', name='Upper Bollinger Band', line=dict(color='orange'),
+        hovertemplate='<b>BB Upper</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['BBL_20'],
+        mode='lines', name='Lower Bollinger Band', line=dict(color='orange'),
+        hovertemplate='<b>BB Lower</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    # Add moving averages (SMA, EMA)
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['SMA_20'],
+        mode='lines', name='SMA 20', line=dict(color='green'),
+        hovertemplate='<b>SMA 20</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['EMA_20'],
+        mode='lines', name='EMA 20', line=dict(color='yelLow'),
+        hovertemplate='<b>EMA 20</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    # Add MACD and Signal Line
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['MACD'],
+        mode='lines', name='MACD', line=dict(color='blue'),
+        hovertemplate='<b>MACD</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['MACD_Signal'],
+        mode='lines', name='MACD Signal', line=dict(color='red'),
+        hovertemplate='<b>MACD Signal</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    # Add RSI
+    fig.add_trace(go.Scatter(
+        x=stock_data.index, y=stock_data['RSI'],
+        mode='lines', name='RSI', line=dict(color='magenta'),
+        hovertemplate='<b>RSI</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    # Add LSTM Predictions
+    fig.add_trace(go.Scatter(
+        x=stock_data.index[-len(stock_data['LSTM_Prediction']):],
+        y=stock_data['LSTM_Prediction'],
+        mode='lines', name='LSTM Prediction', line=dict(color='magenta'),
+        hovertemplate='<b>LSTM Prediction</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    # Add ARIMA Predictions
+    fig.add_trace(go.Scatter(
+        x=stock_data.index[-len(stock_data['ARIMA_Prediction']):],
+        y=stock_data['ARIMA_Prediction'],
+        mode='lines', name='ARIMA Prediction', line=dict(color='blue'),
+        hovertemplate='<b>ARIMA Prediction</b>: %{y}<br><b>Date</b>: %{x}<extra></extra>'
+    ), row=1, col=1)
+
+    # Layout settings with increased height
+    fig.update_layout(
+        title=f'{ticker} Stock Price and Predictions',
+        xaxis_title='Date',
+        yaxis_title='Price (USD)',
+        template='plotly_dark',
+        height=1200,  # Increased height for more visibility
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.02,
+            xanchor="right", x=1
+        )
+    )
+
+# Create a summary box for indicators
+    lr_pred = stock_data['LR_Prediction'].iloc[-1]
+    arima_pred = stock_data['ARIMA_Prediction'].iloc[-1]
+    lstm_pred = stock_data['LSTM_Prediction'].iloc[-1]
+
+    indicators_summary = [
+        f"<b>Bollinger Bands:</b><br>Upper Band: {stock_data['BBU_20'].iloc[-1]:.2f}<br>Lower Band: {stock_data['BBL_20'].iloc[-1]:.2f}",
+        f"<b>SMA 20:</b> {stock_data['SMA_20'].iloc[-1]:.2f}",
+        f"<b>EMA 20:</b> {stock_data['EMA_20'].iloc[-1]:.2f}",
+        f"<b>MACD:</b> {stock_data['MACD'].iloc[-1]:.2f}",
+        f"<b>RSI:</b> {stock_data['RSI'].iloc[-1]:.2f}"
+        f"<b>Linear Regression Prediction:</b> {lr_pred:.2f}",
+        f"<b>ARIMA Prediction:</b> {arima_pred:.2f}",
+        f"<b>LSTM Prediction:</b> {lstm_pred:.2f}"
+    ]
+    summary_text = '<br><br>'.join(indicators_summary)
+
+
+
+
+
+    # Layout settings with increased height and customized background
+    fig.update_layout(
+        title=f'{ticker} Stock Price and Predictions',
+        xaxis_title='Date',
+        yaxis_title='Price (USD)',
+        template='plotly_dark',
+        height=1200,  # Increased height for better visibility
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.02,
+            xanchor="right", x=1
+        ),
+        # Set the background color for the text box row
+        annotations=[
+            dict(
+                xref='paper', yref='paper', x=0.0, y=0.3,
+                text=summary_text,
+                showarrow=False,
+                font=dict(size=10, color='white'),
+                align='left',
+                bgcolor='rgba(0,0,0,0.8)',
+                bordercolor='white',
+                borderwidth=1
+            )
+        ]
+    )
+
+
+    # Indicator explanations and colorization
+    for idx, value in enumerate(stock_data['SMA_20']):
+        color = 'green' if value > stock_data['Close'][idx] else 'red'
+        fig.add_annotation(x=stock_data.index[idx], y=value, text=f'SMA: {value:.2f}',
+                           showarrow=True, arrowhead=1, ax=0, ay=-40, font=dict(color=color))
+
+    for idx, value in enumerate(stock_data['EMA_20']):
+        color = 'yelLow' if value == stock_data['Close'][idx] else ('green' if value > stock_data['Close'][idx] else 'red')
+        fig.add_annotation(x=stock_data.index[idx], y=value, text=f'EMA: {value:.2f}',
+                           showarrow=True, arrowhead=1, ax=0, ay=-40, font=dict(color=color))
+
+    # Show the chart
+    fig.show()
+
+# Main execution
+ticker = 'AAPL'
+primary_index = '^GSPC'
+supporting_indices = ['^NDX', '^DJI', '^RUT', '^FTSE', '^GDAXI', '^N225', '^HSI', '^STOXX50E']
+stock_data = fetch_data_from_yf(ticker)
+stock_data = add_bollinger_bands(stock_data)
+stock_data = add_moving_averages(stock_data)
+stock_data = add_macd(stock_data)
+stock_data = add_rsi(stock_data)
+stock_data, lr_model = linear_regression_model(stock_data)
+stock_data, arima_result = arima_model(stock_data)
+stock_data, lstm_model,lstm_predictions = lstm_model(stock_data)
+stock_data=add_signals(stock_data,arima_result,lstm_predictions)
+
+for symbol in symbols:
+    print('**************** Executing process_symbol ****************')
+    process_symbol(symbol,'1y','1d')
+    print('**************** Executing plot_prediction ****************')
+    #suppress_output(plot_prediction, fetch_data_from_yf_predic(symbol, '10y', '1d'),arima_model,lstm_predictions)
+    plot_prediction(fetch_data_from_yf_predic(ticker, '10y', '1d'), arima_result, lstm_predictions)
+
+
+print('**************** Executing plot_stock_data ****************')
+plot_stock_data(stock_data, ticker)
+print('**************** Executing analyze_macroeconomic_data ****************')
+analyze_macroeconomic_data()
+print('**************** Executing fetch_news_sentiment ****************')
+fetch_news_sentiment()
+get_news_sentiment(ticker)
+print('**************** Executing plot_signals ****************')
+plot_signals(stock_data)
+analyze_index(ticker, supporting_indices)
