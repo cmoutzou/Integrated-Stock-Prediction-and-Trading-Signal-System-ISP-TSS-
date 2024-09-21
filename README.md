@@ -58,5 +58,5 @@ Macroeconomic APIs for real-time data.
 Installation
 To get started, clone the repository and install the required dependencies:
 
-git clone https://github.com/yourusername/ISP-TSS.git
+git clone https://github.com/cmoutzou/Integrated-Stock-Prediction-and-Trading-Signal-System-ISP-TSS-.git
 cd ISP-TSS
